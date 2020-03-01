@@ -124,7 +124,15 @@ do_coveralls(ConvertAndSend, Get, GetLocal, MaybeSkip, Task) ->
 
   Report0 =
     #{service_job_id => ServiceJobId,
-      service_name   => ServiceName},
+      service_name => ServiceName,
+      run_at => format_iso8601(calendar:universal_time())},
+  Report1 = case GetLocal(coveralls_attach_git_info, false) of
+    true ->
+      maps:put(git, git_info(), Report0);
+    false ->
+      Report0
+  end,
+
   Opts = [{coveralls_repo_token,           repo_token,           string},
           {coveralls_service_pull_request, service_pull_request, string},
           {coveralls_parallel,             parallel,             boolean}],
@@ -136,7 +144,7 @@ do_coveralls(ConvertAndSend, Get, GetLocal, MaybeSkip, Task) ->
                       Value when Conv =:= boolean -> maps:put(Key, to_boolean(Value), R);
                       Value -> maps:put(Key, Value, R)
                     end
-                end, Report0, Opts),
+                end, Report1, Opts),
 
   DoCoveralls = (GetLocal(do_coveralls_after_ct, true) andalso Task == ct)
     orelse (GetLocal(do_coveralls_after_eunit, true) andalso Task == eunit)
@@ -151,6 +159,59 @@ do_coveralls(ConvertAndSend, Get, GetLocal, MaybeSkip, Task) ->
     _ -> MaybeSkip()
   end.
 
+format_iso8601({{Y,Mo,D}, {H,Mn,S}}) ->
+  FmtStr = "~4.10.0B-~2.10.0B-~2.10.0BT~2.10.0B:~2.10.0B:~2.10.0BZ",
+  IsoStr = io_lib:format(FmtStr, [Y, Mo, D, H, Mn, S]),
+  list_to_binary(IsoStr).
+
+git_info() ->
+  Port = open_port({spawn, "git rev-parse HEAD"}, [stderr_to_stdout, exit_status]),
+  Head = receive
+    {Port, {data, Data}} -> Data
+  end,
+  receive
+    {Port, {exit_status, 0}} ->
+      git_info(list_to_binary(string:chomp(Head)));
+    {Port, _} ->
+      undef
+  end.
+
+git_info(CommitSha) ->
+  Branch = os_cmd("git rev-parse --abbrev-ref HEAD"),
+  AuthorName = os_cmd(<<"git show --no-patch --format=\"%an\" ", CommitSha/binary, " | head">>),
+  AuthorEmail = os_cmd(<<"git show --no-patch --format=\"%ae\" ", CommitSha/binary, " | head">>),
+  CommitterName = os_cmd(<<"git show --no-patch --format=\"%cn\" ", CommitSha/binary, " | head">>),
+  CommitterEmail = os_cmd(<<"git show --no-patch --format=\"%ce\" ", CommitSha/binary, " | head">>),
+  Message = os_cmd(<<"git show --no-patch --format=\"%s\" ", CommitSha/binary, " | head">>),
+  #{
+    head => #{
+      id => CommitSha,
+      author_name => AuthorName,
+      author_email => AuthorEmail,
+      committer_name => CommitterName,
+      committer_email => CommitterEmail,
+      message => Message
+    },
+    branch => Branch,
+    remotes => parse_git_remote(os_cmd("git remote -v"))
+  }.
+
+os_cmd(Cmd) when is_binary(Cmd) ->
+  os_cmd(binary_to_list(Cmd));
+os_cmd(Cmd) ->
+  list_to_binary(string:chomp(os:cmd(Cmd))).
+
+parse_git_remote(Data) ->
+  List = lists:foldl(fun(Line, Acc) ->
+    [Name, Url | _] = re:split(Line, "[\s\t]+"),
+    case lists:keyfind(Name, 1, Acc) of
+      false ->
+        [{Name, Url} | Acc];
+      _ ->
+        Acc
+    end
+  end, [], string:split(Data, "\n")),
+  [#{name => Name, url => Url} || {Name, Url} <- List].
 
 %%=============================================================================
 %% Tests
